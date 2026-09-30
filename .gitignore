@@ -46,3 +46,7 @@ next-env.d.ts
 
 # Additionals
 public/maplibre
+data/Geolife/*
+data/build/
+public/*.mbtiles
+public/*.geojson
