@@ -1,15 +1,16 @@
-import { createWriteStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { listPltFiles, readPlt, summarizePlt, type TrajRow } from "../lib/plt";
-
-const DATA_DIR = path.join(process.cwd(), "data", "Geolife Trajectories 1.3", "Data");
-const OUT_DIR = path.join(process.cwd(), "data", "build");
-const GEOJSON_FILE = path.join(OUT_DIR, "geolife.geojsonl");
-const SUMMARY_FILE = path.join(OUT_DIR, "summaries.json");
+import { createWriteStream } from "fs";
+import { mkdir, writeFile } from "fs/promises";
+import {
+  BUILD_DIR,
+  GEOJSON_FILE,
+  GEOJSON_INDEX_FILE,
+  SUMMARY_FILE,
+  type GeojsonIndex,
+} from "../lib/build-files";
+import { DATA_DIR, listPltFiles, readPlt, summarizePlt, trajId, type TrajRow } from "../lib/plt";
 
 async function main() {
-  await mkdir(OUT_DIR, { recursive: true });
+  await mkdir(BUILD_DIR, { recursive: true });
   const out = createWriteStream(GEOJSON_FILE);
 
   const write = (line: string) =>
@@ -20,32 +21,42 @@ async function main() {
 
   const files = await listPltFiles(DATA_DIR);
   const summaries: TrajRow[] = [];
+  const index: GeojsonIndex = {};
+  let offset = 0;
   let count = 0;
 
-  for (const { user, file } of files) {
+  for (const pltFile of files) {
+    const { user, trip, file } = pltFile;
     const track = await readPlt(file);
     if (track.geometry.coordinates.length > 0) {
+      const id = trajId(user, trip);
       const feature = {
         type: "Feature",
-        properties: { user, id: track.properties.id },
+        properties: { id, user: Number(user) },
         geometry: track.geometry,
       };
-      await write(JSON.stringify(feature) + "\n");
+      const line = JSON.stringify(feature) + "\n";
+      const length = Buffer.byteLength(line);
+      index[id] = [offset, length];
+      offset += length;
+      await write(line);
     }
 
-    const row = await summarizePlt(file, user);
+    const row = await summarizePlt(pltFile);
     if (row) summaries.push(row);
 
     if (++count % 1000 === 0) console.log(`${count} / ${files.length} trajectories...`);
   }
 
   out.end();
- await new Promise<void>((resolve) => out.on("finish", () => resolve()));
+  await new Promise<void>((resolve) => out.on("finish", () => resolve()));
   await writeFile(SUMMARY_FILE, JSON.stringify(summaries));
+  await writeFile(GEOJSON_INDEX_FILE, JSON.stringify(index));
 
   console.log(`Done: ${count} trajectories`);
   console.log(`  → ${GEOJSON_FILE}`);
   console.log(`  → ${SUMMARY_FILE}`);
+  console.log(`  → ${GEOJSON_INDEX_FILE}`);
 }
 
 main();

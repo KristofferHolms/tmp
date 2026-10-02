@@ -4,32 +4,37 @@ export const DATA_DIR = path.join(process.cwd(), "data", "Geolife", "Data");
 
 export type Track = {
   type: "Feature";
-  properties: { id: string; color: string };
+  properties: { id: string };
   geometry: { type: "MultiLineString"; coordinates: [number, number][][] };
-};
-
-export type TrackCollection = {
-  type: "FeatureCollection";
-  features: Track[];
 };
 
 export type TrajRow = {
   id: string;
+  user: number;
+  trip: number;
   points: number;
-  start: string;
-  end: string;
-  duration: string;
+  start: LngLat;
+  end: LngLat;
+  bbox: [west: number, south: number, east: number, north: number];
+  seconds: number;
 };
+
+export type LngLat = [lon: number, lat: number];
+
+export type PltFile = { user: string; trip: number; file: string };
 
 type PltPoint = { lat: number; lon: number; days: number };
 
 const GAP_MS = 5 * 60 * 1000;
 
-// Parses the raw text of a .plt file into points, skipping header lines
+// Every .plt file starts with 6 header lines that are not points
+const HEADER_LINES = 6;
+
+// Parses the raw text of a .plt file into points
 function parsePltPoints(text: string): PltPoint[] {
   const points: PltPoint[] = [];
 
-  for (const line of text.split(/\r\n|\r|\n/)) {
+  for (const line of text.split(/\r\n|\r|\n/).slice(HEADER_LINES)) {
     const parts = line.split(",");
     const lat = Number(parts[0]);
     const lon = Number(parts[1]);
@@ -44,29 +49,30 @@ function parsePltPoints(text: string): PltPoint[] {
   return points;
 }
 
-// Lists up to `count` .plt files, going through users 000, 001, 002, ...
-export async function listPltFiles(
-  dataDir: string,
-  count = Infinity
-): Promise<{ user: string; file: string }[]> {
+// Readable trajectory id: user number + the user's nth trip, e.g. "0-1"
+export function trajId(user: string, trip: number): string {
+  return `${Number(user)}-${trip}`;
+}
+
+// Lists all .plt files, going through users 000, 001, 002, ...
+// `trip` is the 1-based position of the file among that user's trajectories
+export async function listPltFiles(dataDir: string): Promise<PltFile[]> {
   const users = (await readdir(dataDir)).filter((d) => /^\d{3}$/.test(d)).sort();
-  const files: { user: string; file: string }[] = [];
+  const files: PltFile[] = [];
 
   for (const user of users) {
-    if (files.length >= count) break;
     const dir = path.join(dataDir, user, "Trajectory");
     const userFiles = (await readdir(dir))
       .filter((f) => f.endsWith(".plt"))
-      .sort()
-      .slice(0, count - files.length);
-    files.push(...userFiles.map((f) => ({ user, file: path.join(dir, f) })));
+      .sort();
+    files.push(...userFiles.map((f, i) => ({ user, trip: i + 1, file: path.join(dir, f) })));
   }
 
   return files;
 }
 
 // Reads one .plt file as a GeoJSON feature, split into segments at time gaps
-export async function readPlt(filePath: string, color = "#ff5a36"): Promise<Track> {
+export async function readPlt(filePath: string): Promise<Track> {
   const points = parsePltPoints(await readFile(filePath, "utf8"));
 
   const segments: [number, number][][] = [];
@@ -86,56 +92,40 @@ export async function readPlt(filePath: string, color = "#ff5a36"): Promise<Trac
 
   return {
     type: "Feature",
-    properties: { id: path.basename(filePath, ".plt"), color },
+    properties: { id: path.basename(filePath, ".plt") },
     geometry: { type: "MultiLineString", coordinates: segments },
   };
 }
 
-// Loads up to `count` trajectories as a GeoJSON FeatureCollection
-export async function readTracks(dataDir: string, count: number): Promise<TrackCollection> {
-  const files = await listPltFiles(dataDir, count);
-
-  const features = await Promise.all(
-    files.map(({ file }, i) => {
-      const hue = Math.round((i * 360) / files.length);
-      return readPlt(file, `hsl(${hue}, 85%, 60%)`);
-    })
-  );
-
-  return {
-    type: "FeatureCollection",
-    features: features.filter((t) => t.geometry.coordinates.length > 0),
-  };
-}
-
-function formatDuration(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return [h, m, sec].map((n) => String(n).padStart(2, "0")).join(":");
+function bboxOf(points: PltPoint[]): TrajRow["bbox"] {
+  let [west, south, east, north] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const { lon, lat } of points) {
+    west = Math.min(west, lon);
+    south = Math.min(south, lat);
+    east = Math.max(east, lon);
+    north = Math.max(north, lat);
+  }
+  return [west, south, east, north];
 }
 
 // Summarizes one .plt file for the table
-export async function summarizePlt(filePath: string, user: string): Promise<TrajRow | null> {
-  const points = parsePltPoints(await readFile(filePath, "utf8"));
+export async function summarizePlt({ user, trip, file }: PltFile): Promise<TrajRow | null> {
+  const points = parsePltPoints(await readFile(file, "utf8"));
   if (points.length === 0) return null;
 
   const first = points[0];
   const last = points[points.length - 1];
+  // ~1 m precision is plenty, and keeps summaries.json small
+  const round = (n: number) => Math.round(n * 1e5) / 1e5;
 
   return {
-    id: `${user}/${path.basename(filePath, ".plt")}`,
+    id: trajId(user, trip),
+    user: Number(user),
+    trip,
     points: points.length,
-    start: `${first.lat.toFixed(3)}, ${first.lon.toFixed(3)}`,
-    end: `${last.lat.toFixed(3)}, ${last.lon.toFixed(3)}`,
-    duration: formatDuration((last.days - first.days) * 86_400),
+    start: [round(first.lon), round(first.lat)],
+    end: [round(last.lon), round(last.lat)],
+    bbox: bboxOf(points).map(round) as TrajRow["bbox"],
+    seconds: Math.max(0, Math.round((last.days - first.days) * 86_400)),
   };
-}
-
-// Summarizes up to `count` trajectories directly from the .plt files
-export async function readSummaries(dataDir: string, count: number): Promise<TrajRow[]> {
-  const files = await listPltFiles(dataDir, count);
-  const rows = await Promise.all(files.map(({ user, file }) => summarizePlt(file, user)));
-  return rows.filter((r): r is TrajRow => r !== null);
 }

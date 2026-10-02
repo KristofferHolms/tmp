@@ -1,50 +1,40 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import MapView from "@/components/map/map";
 import { TrajTable } from "@/components/datatable/trajtable";
-import { DATA_DIR, readSummaries, type TrajRow } from "@/lib/plt";
-
-const SUMMARY_FILE = path.join(process.cwd(), "data", "build", "summaries.json");
+import { getSummary, getSummaryPage, SORT_KEYS, type SortKey } from "@/lib/summaries";
+import { getTrackGeometry } from "@/lib/tracks";
 
 // How many rows per page in the table
-const PAGE_SIZE = 100;
-
-async function loadRows(page: number): Promise<{ rows: TrajRow[]; total: number }> {
-  const start = (page - 1) * PAGE_SIZE;
-  const end = start + PAGE_SIZE;
-
-  try {
-    // Fast path: precomputed by `bun run tiles:geojson`
-    const all: TrajRow[] = JSON.parse(await readFile(SUMMARY_FILE, "utf8"));
-    return { rows: all.slice(start, end), total: all.length };
-  } catch {
-    // Fallback: read .plt files directly (one extra to know if there's a next page)
-    const all = await readSummaries(DATA_DIR, end + 1);
-    return { rows: all.slice(start, end), total: all.length };
-  }
-}
+const PAGE_SIZE = 20;
 
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{ page?: string; q?: string; sort?: string; dir?: string; sel?: string }>;
 }) {
-  const { page: pageParam } = await searchParams;
-  const page = Math.max(1, Math.floor(Number(pageParam)) || 1);
+  const params = await searchParams;
+  const sort = SORT_KEYS.includes(params.sort as SortKey) ? (params.sort as SortKey) : "id";
 
-  const { rows, total } = await loadRows(page);
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const selected = params.sel ? await getSummary(params.sel) : null;
+  const selectedGeometry = selected ? await getTrackGeometry(selected.id) : null;
+  
+  const summary = await getSummaryPage({
+    sel: selected?.id ?? null,
+    page: Math.max(1, Math.floor(Number(params.page)) || 1),
+    pageSize: PAGE_SIZE,
+    q: params.q ?? "",
+    sort,
+    dir: params.dir === "desc" ? "desc" : "asc",
+  });
 
   return (
-    <main className="flex min-h-screen flex-col items-center gap-8 p-24">
-      <MapView />
-      <TrajTable
-        rows={rows}
-        total={total}
-        page={page}
-        totalPages={totalPages}
-        pageSize={PAGE_SIZE}
-      />
+    // Side by side on wide screens (each half scrolls on its own), stacked on narrow ones
+    <main className="flex flex-col lg:grid lg:h-screen lg:grid-cols-2">
+      <div className="h-[60vh] lg:h-screen">
+        <MapView selected={selected} selectedGeometry={selectedGeometry} />
+      </div>
+      <div className="p-4 lg:overflow-y-auto">
+        <TrajTable {...summary} />
+      </div>
     </main>
   );
 }

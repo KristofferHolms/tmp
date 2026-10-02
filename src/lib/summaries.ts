@@ -1,13 +1,22 @@
 import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { DATA_DIR, listPltFiles, summarizePlt, type TrajRow } from "./plt";
+import { SUMMARY_FILE } from "./build-files";
+import type { TrajRow } from "./plt";
 
-const SUMMARY_FILE = path.join(process.cwd(), "data", "build", "summaries.json");
+export const SORT_KEYS = ["id", "points", "seconds"] as const;
+export type SortKey = (typeof SORT_KEYS)[number];
+export type SortDir = "asc" | "desc";
 
-export type SummaryPage = {
-  rows: TrajRow[];
+export type SummaryQuery = {
+  sel: string | null;
   page: number;
   pageSize: number;
+  q: string;
+  sort: SortKey;
+  dir: SortDir;
+};
+
+export type SummaryPage = SummaryQuery & {
+  rows: TrajRow[];
   total: number;
   totalPages: number;
 };
@@ -15,46 +24,50 @@ export type SummaryPage = {
 let cache: TrajRow[] | null = null;
 
 // Loads the precomputed summaries once and keeps them in memory
-async function loadAllSummaries(): Promise<TrajRow[] | null> {
+async function loadAllSummaries(): Promise<TrajRow[]> {
   if (cache) return cache;
   try {
     cache = JSON.parse(await readFile(SUMMARY_FILE, "utf8")) as TrajRow[];
     return cache;
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`Could not read ${SUMMARY_FILE}. Run \`bun run data:build\` first.`, {
+      cause: error,
+    });
   }
 }
 
-export async function getSummaryPage(page: number, pageSize: number): Promise<SummaryPage> {
+const compare: Record<SortKey, (a: TrajRow, b: TrajRow) => number> = {
+  id: (a, b) => a.user - b.user || a.trip - b.trip,
+  points: (a, b) => a.points - b.points,
+  seconds: (a, b) => a.seconds - b.seconds,
+};
+
+export async function getSummary(id: string): Promise<TrajRow | null> {
+  return (await loadAllSummaries()).find((row) => row.id === id) ?? null;
+}
+
+export async function getSummaryPage(query: SummaryQuery): Promise<SummaryPage> {
   const all = await loadAllSummaries();
+  const { pageSize, q, sort, dir } = query;
 
-  if (all) {
-    const total = all.length;
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    const current = Math.min(Math.max(1, page), totalPages);
-    const start = (current - 1) * pageSize;
+  // Prefix match, so "12-" finds all of user 12's trajectories
+  const needle = q.trim().toLowerCase();
+  const matches = needle ? all.filter((row) => row.id.startsWith(needle)) : [...all];
 
-    return {
-      rows: all.slice(start, start + pageSize),
-      page: current,
-      pageSize,
-      total,
-      totalPages,
-    };
-  }
+  // Ties fall back to id order so the result is stable
+  const sign = dir === "asc" ? 1 : -1;
+  matches.sort((a, b) => sign * compare[sort](a, b) || compare.id(a, b));
 
-  // Fallback: no summaries.json yet, so summarize only this page's files
-  const files = await listPltFiles(DATA_DIR);
-  const total = files.length;
+  const total = matches.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const current = Math.min(Math.max(1, page), totalPages);
-  const start = (current - 1) * pageSize;
+  const page = Math.min(Math.max(1, query.page), totalPages);
+  const start = (page - 1) * pageSize;
 
-  const rows = (
-    await Promise.all(
-      files.slice(start, start + pageSize).map(({ user, file }) => summarizePlt(file, user))
-    )
-  ).filter((r): r is TrajRow => r !== null);
-
-  return { rows, page: current, pageSize, total, totalPages };
+  return {
+    ...query,
+    page,
+    rows: matches.slice(start, start + pageSize),
+    total,
+    totalPages,
+  };
 }
